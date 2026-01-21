@@ -145,3 +145,30 @@ class OllamaService(BaseBackend):
                 json={"model": model, "input": input, **kwargs},
             )
             return response.json()
+
+    def proxy(self, method: str, path: str, body: dict | None = None) -> dict:
+        """Generic proxy to forward requests to local Ollama server.
+
+        Args:
+            method: HTTP method (GET, POST, DELETE)
+            path: Request path (e.g., '/api/tags', '/v1/chat/completions')
+            body: Request body for POST requests
+
+        Returns:
+            Dict with 'status_code' and 'body' from Ollama response
+        """
+        url = f"http://localhost:{self.config.port}{path}"
+        with httpx.Client(timeout=600.0) as client:
+            if method == "GET":
+                response = client.get(url)
+            elif method == "POST":
+                response = client.post(url, json=body)
+            elif method == "DELETE":
+                response = client.delete(url)
+            else:
+                return {"status_code": 405, "body": {"error": f"Method {method} not allowed"}}
+
+            try:
+                return {"status_code": response.status_code, "body": response.json()}
+            except Exception:
+                return {"status_code": response.status_code, "body": response.text}

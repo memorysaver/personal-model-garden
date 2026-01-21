@@ -13,6 +13,7 @@ Serve locally for testing:
 
 import modal
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from config import (
     APP_NAME,
@@ -111,6 +112,11 @@ class OllamaBackend:
         """Health check for the Ollama backend."""
         return self.service.health_check()
 
+    @modal.method()
+    def proxy(self, method: str, path: str, body: dict | None = None) -> dict:
+        """Generic proxy to forward requests to local Ollama server."""
+        return self.service.proxy(method, path, body)
+
 
 # =============================================================================
 # FastAPI Gateway
@@ -138,59 +144,36 @@ async def root():
         "architecture": "Gateway (CPU) + Backends (GPU)",
         "endpoints": {
             "/health": "Gateway health check",
-            "/ollama/api/tags": "List Ollama models",
-            "/ollama/api/generate": "Generate text (POST)",
-            "/ollama/api/chat": "Chat completion (POST)",
-            "/ollama/api/show": "Show model info (POST)",
-            "/ollama/api/embed": "Generate embeddings (POST)",
-            "/ollama/health": "Ollama backend health (triggers cold start)",
+            "/ollama/*": "Wildcard proxy to Ollama (native + OpenAI-compatible API)",
+        },
+        "ollama_examples": {
+            "GET /ollama/api/tags": "List models (native)",
+            "POST /ollama/api/generate": "Generate text (native)",
+            "POST /ollama/api/chat": "Chat completion (native)",
+            "GET /ollama/v1/models": "List models (OpenAI)",
+            "POST /ollama/v1/chat/completions": "Chat completion (OpenAI)",
         },
     }
 
 
 # =============================================================================
-# Ollama Routes (calls remote OllamaBackend)
+# Ollama Wildcard Proxy (forwards all /ollama/* to backend)
 # =============================================================================
 
 
-@gateway.get("/ollama/api/tags")
-async def ollama_list_models():
-    """List available Ollama models."""
-    return OllamaBackend().list_models.remote()
+@gateway.api_route("/ollama/{path:path}", methods=["GET", "POST", "DELETE"])
+async def ollama_proxy(path: str, request: Request):
+    """Proxy all Ollama requests to the backend.
 
+    Supports both native Ollama API (/api/*) and OpenAI-compatible API (/v1/*).
+    """
+    method = request.method
+    body = None
+    if method == "POST":
+        body = await request.json()
 
-@gateway.post("/ollama/api/generate")
-async def ollama_generate(request: Request):
-    """Generate text using Ollama."""
-    body = await request.json()
-    return OllamaBackend().generate.remote(**body)
-
-
-@gateway.post("/ollama/api/chat")
-async def ollama_chat(request: Request):
-    """Chat completion using Ollama."""
-    body = await request.json()
-    return OllamaBackend().chat.remote(**body)
-
-
-@gateway.post("/ollama/api/show")
-async def ollama_show(request: Request):
-    """Show model information."""
-    body = await request.json()
-    return OllamaBackend().show_model.remote(**body)
-
-
-@gateway.post("/ollama/api/embed")
-async def ollama_embed(request: Request):
-    """Generate embeddings."""
-    body = await request.json()
-    return OllamaBackend().embeddings.remote(**body)
-
-
-@gateway.get("/ollama/health")
-async def ollama_health():
-    """Check Ollama backend health (will trigger cold start if not running)."""
-    return OllamaBackend().health.remote()
+    result = OllamaBackend().proxy.remote(method, f"/{path}", body)
+    return JSONResponse(content=result["body"], status_code=result["status_code"])
 
 
 # =============================================================================
