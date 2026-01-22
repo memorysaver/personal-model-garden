@@ -19,6 +19,7 @@ from config import (
     APP_NAME,
     GATEWAY_MIN_CONTAINERS,
     OLLAMA_GPU,
+    OLLAMA_MAX_CONTAINERS,
     OLLAMA_SCALEDOWN,
     OLLAMA_TIMEOUT,
 )
@@ -70,6 +71,7 @@ ollama_image = (
     image=ollama_image,
     gpu=OLLAMA_GPU,
     volumes={ollama_config.volume_mount: ollama_volume},
+    max_containers=OLLAMA_MAX_CONTAINERS,
     scaledown_window=OLLAMA_SCALEDOWN,
     timeout=OLLAMA_TIMEOUT,
 )
@@ -173,6 +175,36 @@ def is_streaming_request(body: dict | None) -> bool:
     return body.get("stream", False) is True
 
 
+# Paths to handle in gateway (don't wake GPU container)
+GATEWAY_ONLY_PATHS = {
+    "api/event_logging",
+    "api/event_logging/batch",
+}
+
+
+def estimate_tokens(body: dict | None) -> int:
+    """Estimate token count from message content (~4 chars per token)."""
+    if not body:
+        return 0
+    total_chars = 0
+    # Count characters in messages
+    for msg in body.get("messages", []):
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            # Handle multi-part content (text, images, etc.)
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    total_chars += len(part.get("text", ""))
+    # Count system prompt if present
+    system = body.get("system", "")
+    if isinstance(system, str):
+        total_chars += len(system)
+    # Rough estimate: ~4 characters per token
+    return max(1, total_chars // 4)
+
+
 @gateway.api_route("/ollama/{path:path}", methods=["GET", "POST", "DELETE"])
 async def ollama_proxy(path: str, request: Request):
     """Proxy all Ollama requests to the backend.
@@ -180,10 +212,18 @@ async def ollama_proxy(path: str, request: Request):
     Supports both native Ollama API (/api/*) and OpenAI-compatible API (/v1/*).
     Streaming requests (stream: true) use .remote_gen() for true SSE support.
     """
+    # Filter out telemetry/logging calls - handle in gateway without waking GPU
+    if path in GATEWAY_ONLY_PATHS or path.startswith("api/event_logging"):
+        return JSONResponse(content={"status": "ok"}, status_code=200)
+
     method = request.method
     body = None
     if method == "POST":
         body = await request.json()
+
+    # Handle token counting in gateway (Ollama doesn't support this endpoint)
+    if path == "v1/messages/count_tokens":
+        return JSONResponse(content={"input_tokens": estimate_tokens(body)}, status_code=200)
 
     # Streaming requests use .remote_gen() for true SSE support
     if is_streaming_request(body):
